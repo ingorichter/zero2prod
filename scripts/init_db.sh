@@ -13,36 +13,48 @@ fi
 # Check if a custom parameter has been ste, otherwise use default values
 DB_PORT="${DB_PORT:=5432}"
 SUPERUSER="${SUPERUSER:=postgres}"
-SUPERUSER_PASSWORD="${SUPERUSER_PASSWORD:=postgres}"
+SUPERUSER_PASSWORD="${SUPERUSER_PASSWORD:=password}"
 APP_USER="${APP_USER:=app}"
 APP_USER_PASSWORD="${APP_USER_PASSWORD:=secret}"
 APP_DB_NAME="${APP_DB_NAME:=newsletter}"
-DATABASE_URL="postgres://${APP_USER}:${APP_USER_PASSWORD}@localhost:${DB_PORT}/${APP_DB_NAME}"
-export DATABASE_URL
 
 # Allow to skip Docker if dockerized Postgres databse is already running
 if [[ -z "$SKIP_DOCKER" ]]
 then
     #launch postgres using docker
-    CONTAINER_NAME=postgres
-    docker run --name $CONTAINER_NAME -e POSTGRES_PASSWORD="$SUPERUSER_PASSWORD" -e POSTGRES_USER="$SUPERUSER" --health-cmd="pg_isready -U $SUPERUSER || exit 1" --health-interval=1s --health-timeout=5s --health-retries=5 -p "$DB_PORT":5432 --detach "postgres:latest" -N 1000
+    CONTAINER_NAME="postgres_$(date '+%s')"
 
-    until [ "$(docker inspect -f "{{ .State.Health.Status }}" $CONTAINER_NAME)" == "healthy" ]; do
+    docker run \
+      --env POSTGRES_USER="${SUPERUSER}" \
+      --env POSTGRES_PASSWORD="${SUPERUSER_PASSWORD}" \
+      --health-cmd="pg_isready -U ${SUPERUSER} || exit 1" \
+      --health-interval=1s \
+      --health-timeout=5s \
+      --health-retries=5 \
+      --publish "${DB_PORT}":5432 \
+      --detach \
+      --name "${CONTAINER_NAME}" \
+      postgres:latest -N 1000
+      # ^ Increased maximum number of connections for testing purposes
+
+    until [ "$(docker inspect -f "{{ .State.Health.Status }}" "$CONTAINER_NAME")" == "healthy" ]; do
         >&2 echo "Postgres is unavailable - sleeping"
         sleep 1
     done
 
     # create the application user
-    CREATE_QUERY="CREATE USER $APP_USER WITH PASSWORD '$APP_USER_PASSWORD';"
-    docker exec -it $CONTAINER_NAME psql -U "$SUPERUSER" -c "$CREATE_QUERY"
+    CREATE_QUERY="CREATE USER ${APP_USER} WITH PASSWORD '${APP_USER_PASSWORD}';"
+    docker exec -it "${CONTAINER_NAME}" psql -U "${SUPERUSER}" -c "${CREATE_QUERY}"
 
     # Grant create db privileges to application user
-    GRANT_QUERY="ALTER USER $APP_USER CREATEDB;"
-    docker exec -it $CONTAINER_NAME psql -U "$SUPERUSER" -c "$GRANT_QUERY"
+    GRANT_QUERY="ALTER USER ${APP_USER} CREATEDB;"
+    docker exec -it "${CONTAINER_NAME}" psql -U "${SUPERUSER}" -c "${GRANT_QUERY}"
 fi
 
 >&2 echo "Postgres is up and running on port ${DB_PORT} - running migrations now!"
 
+DATABASE_URL="postgres://${APP_USER}:${APP_USER_PASSWORD}@localhost:${DB_PORT}/${APP_DB_NAME}"
+export DATABASE_URL
 sqlx database create
 sqlx migrate run
 
