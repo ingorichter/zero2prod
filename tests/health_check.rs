@@ -1,8 +1,22 @@
-use std::net::TcpListener;
+use std::{net::TcpListener, sync::LazyLock};
 
+use secrecy::ExposeSecret;
 use sqlx::{Connection, PgConnection, Executor, PgPool};
 use uuid::Uuid;
-use zero2prod::configuration::{get_configuration, DatabaseSettings};
+use zero2prod::{configuration::{get_configuration, DatabaseSettings}, telemetry::{get_subscriber, init_subscriber}};
+
+static TRACING: LazyLock<()> = LazyLock::new(|| {
+    let default_filter_level = "info".to_string();
+    let subscriber_name = "test".to_string();
+
+    if std::env::var("TEST_LOG").is_ok() {
+        let subscriber = get_subscriber(subscriber_name, default_filter_level,std::io::stdout);
+        init_subscriber(subscriber);
+    } else {
+        let subscriber = get_subscriber(subscriber_name, default_filter_level, std::io::sink);
+        init_subscriber(subscriber);
+    }
+});
 
 pub struct TestApp {
     pub address: String,
@@ -84,11 +98,11 @@ pub async fn configure_database(config: &zero2prod::configuration::DatabaseSetti
     let maintenence_settings = DatabaseSettings {
         database_name: "postgres".to_string(),
         username: "postgres".to_string(),
-        password: "password".to_string(),
+        password: "password".to_string().into(),
         ..config.clone()
     };
 
-    let mut connection = PgConnection::connect(&maintenence_settings.connection_string())
+    let mut connection = PgConnection::connect(&maintenence_settings.connection_string().expose_secret())
     .await
     .expect("Failed to connect to Postgres");
 
@@ -96,7 +110,7 @@ pub async fn configure_database(config: &zero2prod::configuration::DatabaseSetti
     connection.execute(format!(r#"ALTER DATABASE "{}" OWNER TO "{}";"#, config.database_name, &config.username).as_str()).await.expect("Failed to grant ownership to tables");
 
     // Migrate database
-    let connection_pool = PgPool::connect(&config.connection_string()).await.expect("Failed to connect to Postgres");
+    let connection_pool = PgPool::connect(&config.connection_string().expose_secret()).await.expect("Failed to connect to Postgres");
     sqlx::migrate!("./migrations")
         .run(&connection_pool)
         .await
@@ -106,6 +120,8 @@ pub async fn configure_database(config: &zero2prod::configuration::DatabaseSetti
 }
 
 async fn spawn_app() -> TestApp {
+    LazyLock::force(&TRACING);
+
     let listener = TcpListener::bind("127.0.0.1:0").expect("Failed to bind address");
     let port = listener.local_addr().unwrap().port();
     let address = format!("http://127.0.0.1:{}", port);
